@@ -7,8 +7,11 @@
 #include <thread>
 #include <vector>
 
-double Data::rad() { return std::atan2(x, y); }
-double Data::r2() { return x * x + y * y; }
+double Data_Pol::rad() { return std::atan2(x, y); }  // atan2 を返す。
+double Data_Pol::r2() { return x * x + y * y; }      // 中心からの距離の二乗を返す。
+double Data_Pol::r() { return std::sqrt(r2()); }     // 中心からの距離を返す。
+
+Circ_Detector::Circ_Detector() {}
 
 double Circ_Detector::circ_fitting() {
   double T30 = 0;
@@ -22,7 +25,7 @@ double Circ_Detector::circ_fitting() {
   double xbar = 0;
   double ybar = 0;
   double N = filtered_data.size();
-  // std::cout << N << std::endl;
+  // データ数が三つ以下のときは、処理できない
   if (N < 3) {
     return -1;
   }
@@ -31,7 +34,7 @@ double Circ_Detector::circ_fitting() {
     xbar += i.x / N;
     ybar += i.y / N;
   }
-
+  // 二乗フィッティング
   for (auto&& i : filtered_data) {
     X = i.x - xbar;
     Y = i.y - ybar;
@@ -48,18 +51,58 @@ double Circ_Detector::circ_fitting() {
   y = -T11 * (T30 + T12) + T20 * (T03 + T21);
   y /= 2 * (T20 * T02 - T11 * T11);
   r = x * x + y * y + (T20 + T02) / N;
-  std::cout << x + xbar << " " << y + ybar << std::endl;
-  // " r = " << std::sqrt(r) << std::endl;
-  return 0;
+  r = std::sqrt(r);
+  // エラーを求める 観測誤差
+  double error = 0;
+  for (auto&& i : filtered_data) {
+    double dr = std::sqrt((i.x - x) * (i.x - x) + (i.y - y) * (i.y - y)) - r;
+    dr *= dr;
+    error += dr;
+    error /= (N - 1);
+  }
+  if (r < r_min || r > r_max) {
+    return -1;  // 検出に失敗
+  }
+  if (error > error_threshold) {
+    return -1;  // 検出に失敗
+  }
+  double t = 0;  // 時間を平均にとる。
+  for (auto&& i : filtered_data) {
+    t += i.t / N;
+  }
+  // posに格納
+  pos.push_front({{t, x, y}, r, error});
+  if (pos.size() > QUE_SIZE) {
+    pos.pop_back();
+  }
+  if (pos.size() >= 2) {
+    double dt = pos.at(0).t - pos.at(1).t;
+    vel.push_front({(pos.at(0).t + pos.at(1).t) / 2,   //
+                    (pos.at(0).x - pos.at(1).x) / dt,  //
+                    (pos.at(0).y - pos.at(1).y) / dt});
+  }
+  if (vel.size() > QUE_SIZE) {
+    vel.pop_back();
+  }
+  if (vel.size() >= 2) {
+    double dt = vel.at(0).t - vel.at(1).t;
+    vel.push_front({(vel.at(0).t + vel.at(1).t) / 2,   //
+                    (vel.at(0).x - vel.at(1).x) / dt,  //
+                    (vel.at(0).y - vel.at(1).y) / dt});
+  }
+  if (pos.size() > QUE_SIZE) {
+    pos.pop_back();
+  }
+  return error;  // 検出に成功
 }
 
-bool Circ_Detector::filter(Data data) {  //
+bool Circ_Detector::filter(Data_Pol data) {  //
   // 直前の位置から、フィルターをかけるようにする。
   return (data.x * data.x + data.y * data.y) < 30'000'000 && data.y > -1000  //
          && data.y < 10000 && data.x < 10000;
 }
 
-void Circ_Detector::loop(Data data) {
+void Circ_Detector::loop(Data_Pol data) {
   static int counter = 0;  // デバッグ用
   // データの更新
   rad = data.rad();
@@ -70,7 +113,7 @@ void Circ_Detector::loop(Data data) {
         && (r2 - r2_prev) < r2_threshold  //
         && cycle == cycle_prev) {         // サイクルが変わってないなら
       if (!is_one_object) {
-        buf = std::vector<Data>();
+        buf = std::vector<Data_Pol>();
         buf.push_back(data);
       } else {
         buf.push_back(data);
@@ -79,7 +122,11 @@ void Circ_Detector::loop(Data data) {
     } else {
       if (buf.size() > 0) {
         filtered_data = buf;
-        circ_fitting();
+        if (circ_fitting() < 0) {
+          prev_detected++;
+        } else {
+          prev_detected = 0;
+        }
       }
       is_one_object = false;
     }
